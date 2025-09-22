@@ -6,6 +6,7 @@ import {TickMath} from './lib/TickMath.sol';
 import {Position} from './lib/Position.sol';
 import {SafeCast} from './lib/SafeCast.sol';
 import {SqrtPriceMath} from './lib/SqrtPriceMath.sol';
+import {TransferHelper} from './lib/TransferHelper.sol';
 import {IERC20} from './interfaces/IERC20.sol';
 
 using SafeCast for uint256;
@@ -119,7 +120,28 @@ contract Core {
         }
     }
 
-    function collect() external {}
+    function collect(
+        address recipient,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 amount0Requested,
+        uint128 amount1Requested
+    ) external lock returns (uint128 amount0, uint128 amount1) {
+        Position.Info storage position = Position.get(positions, msg.sender, tickLower, tickUpper);
+
+        amount0 = amount0Requested > position.tokensOwed0 ? position.tokensOwed0 : amount0Requested;
+        amount1 = amount1Requested > position.tokensOwed1 ? position.tokensOwed1 : amount1Requested;
+
+        if (amount0 > 0) {
+            position.tokensOwed0 -= amount0;
+            // USDC and USDT doesn't return a boolean
+            TransferHelper.safeTransfer(token0, recipient, amount0);
+        }
+        if (amount1 > 0) {
+            position.tokensOwed1 -= amount1;
+            TransferHelper.safeTransfer(token1, recipient, amount1);
+        }
+    }
 
     // Burn liquidity from a position
     function burn(
