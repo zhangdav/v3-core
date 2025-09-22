@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.19;
 
-import "./lib/Tick.sol";
-import "./lib/TickMath.sol";
-import "./lib/Position.sol";
-import "./lib/SafaCast.sol";
-import "./interfaces/IERC20.sol";
+import {Tick} from './lib/Tick.sol';
+import {TickMath} from './lib/TickMath.sol';
+import {Position} from './lib/Position.sol';
+import {SafeCast} from './lib/SafeCast.sol';
+import {SqrtPriceMath} from './lib/SqrtPriceMath.sol';
+import {IERC20} from './interfaces/IERC20.sol';
 
 using SafeCast for int256;
 using Position for Position.Info;
 using Tick for mapping(int24 => Tick.Info);
 using Tick for Tick.Info;
 
-contract Swap {
+contract Core {
     address public immutable token0;
     address public immutable token1;
     uint24 public immutable fee;
     int24 public immutable tickSpacing;
     uint128 public immutable maxLiquidityPerTick;
+    uint128 public liquidity;
 
     struct ModifyPositionParams {
         address owner;
@@ -132,7 +134,42 @@ contract Swap {
             _slot0.tick
         );
 
-        return (positions[bytes32(0)], 0, 0);
+        if (params.liquidityDelta != 0) {
+            // Condition: P < P_lower
+            if (_slot0.tick < params.tickLower) {
+            // delta x = delta L * (1/√P_A - 1/√P_B)
+            amount0 = SqrtPriceMath.getAmount0Delta(
+                TickMath.getSqrtRatioAtTick(params.tickLower),  // √P_A
+                TickMath.getSqrtRatioAtTick(params.tickUpper),  // √P_B
+                params.liquidityDelta                           // delta L
+            );
+            // Condition: P_lower < P < P_upper
+            } else if (_slot0.tick > params.tickUpper) {
+                // delta L = (delta x / 1/√P - 1/√P_B = delta y / √P - 1/√P_B
+                amount0 = SqrtPriceMath.getAmount0Delta(
+                    _slot0.sqrtPriceX96,                            // √P
+                    TickMath.getSqrtRatioAtTick(params.tickUpper),  // √P_B
+                    params.liquidityDelta                           // delta L
+                );
+                amount1 = SqrtPriceMath.getAmount1Delta(
+                    TickMath.getSqrtRatioAtTick(params.tickLower),  // √P_A
+                    _slot0.sqrtPriceX96,                            // √P
+                    params.liquidityDelta                           // delta L
+                );
+
+                liquidity = params.liquidityDelta < 0
+                    ? liquidity - uint128(-params.liquidityDelta)
+                    : liquidity + uint128(params.liquidityDelta);
+            // Condition: P > P_upper
+            } else {
+                // delta y = delta L * (√P_B - √P_A)
+                amount1 = SqrtPriceMath.getAmount1Delta(
+                    TickMath.getSqrtRatioAtTick(params.tickLower),  // √P_A
+                    TickMath.getSqrtRatioAtTick(params.tickUpper),  // √P_B
+                    params.liquidityDelta                           // delta L
+                );
+            }
+        }
     }
 
     function _updatePosition(
@@ -174,7 +211,7 @@ contract Swap {
         /// TODO: fees
         position.update(liquidityDelta, 0, 0);
 
-        // for decreasing liquidity just in case we clear the tick
+        // When decreasing liquidity, clear the tick
         if (liquidityDelta < 0) {
             if (flippedLower) {
                 ticks.clear(tickLower);
