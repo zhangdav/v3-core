@@ -3,7 +3,8 @@ pragma solidity 0.8.19;
 
 import "./TickMath.sol";
 
-/* X = token 0
+/* 
+*  X = token 0
 *  Y = token 1
 *  P = Price of X in terms of Y = Y/X
 *  P = 1.0001 ** tick
@@ -18,7 +19,12 @@ import "./TickMath.sol";
 *  for example, tick spacing = 2
 *    |     |     |     |     |   
 *  --|--|--|--|--|--|--|--|--|--
-*   -4 -3 -2 -1  0  1  2  3  4  
+*   -4 -3 -2 -1  0  1  2  3  4
+*
+*  sqrtPriceX96  = √P Q96
+*  Q96 = 2 ** 96
+*  sqrt price = (sqrtPriceX96 / Q96) ** 2
+*  tick = 2log(sqrtPriceX96 / Q96) / log(1.0001)
 */
 library Tick {
     function tickSpacingToMaxLiquidityPerTick(int24 tickSpacing) internal pure returns (uint128) {
