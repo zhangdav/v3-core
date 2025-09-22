@@ -8,8 +8,9 @@ import "./lib/SafaCast.sol";
 import "./interfaces/IERC20.sol";
 
 using SafeCast for int256;
-using Position for mapping(bytes32 => Position.Info);
 using Position for Position.Info;
+using Tick for mapping(int24 => Tick.Info);
+using Tick for Tick.Info;
 
 contract Swap {
     address public immutable token0;
@@ -43,6 +44,9 @@ contract Swap {
 
     // ID => position
     mapping(bytes32 => Position.Info) public positions;
+
+    // tick => tick info
+    mapping(int24 => Tick.Info) public ticks;
 
     // Reentrancy guard
     modifier lock() {
@@ -144,8 +148,41 @@ contract Swap {
         uint256 _feeGrowthGlobal0X128 = 0;
         uint256 _feeGrowthGlobal1X128 = 0;
 
+        bool flippedLower;
+        bool flippedUpper;
+        if (liquidityDelta != 0) {
+            flippedLower = ticks.update(
+                tickLower,
+                tick,
+                liquidityDelta,
+                _feeGrowthGlobal0X128,
+                _feeGrowthGlobal1X128,
+                false,
+                maxLiquidityPerTick
+            );
+            flippedUpper = ticks.update(
+                tickUpper,
+                tick,
+                liquidityDelta,
+                _feeGrowthGlobal0X128,
+                _feeGrowthGlobal1X128,
+                true,
+                maxLiquidityPerTick
+            );
+        }
+
         /// TODO: fees
         position.update(liquidityDelta, 0, 0);
+
+        // for decreasing liquidity just in case we clear the tick
+        if (liquidityDelta < 0) {
+            if (flippedLower) {
+                ticks.clear(tickLower);
+            }
+            if (flippedUpper) {
+                ticks.clear(tickUpper);
+            }
+        }
     }
 
     function checkTicks(int24 tickLower, int24 tickUpper) 
