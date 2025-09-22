@@ -8,6 +8,7 @@ import {SafeCast} from './lib/SafeCast.sol';
 import {SqrtPriceMath} from './lib/SqrtPriceMath.sol';
 import {IERC20} from './interfaces/IERC20.sol';
 
+using SafeCast for uint256;
 using SafeCast for int256;
 using Position for Position.Info;
 using Tick for mapping(int24 => Tick.Info);
@@ -118,9 +119,39 @@ contract Core {
         }
     }
 
+    function collect() external {}
+
+    // Burn liquidity from a position
+    function burn(
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 amount
+    ) external lock returns (uint256 amount0, uint256 amount1) {
+        (Position.Info storage position, int256 amount0Int, int256 amount1Int) =
+        _modifyPosition(
+            ModifyPositionParams({
+                owner: msg.sender,
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                liquidityDelta: -int256(uint256(amount)).toInt128()
+            })
+        );
+
+        amount0 = uint256(-amount0Int);
+        amount1 = uint256(-amount1Int);
+
+        if (amount0 > 0 || amount1 > 0) {
+            // no transfer of tokens
+            (position.tokensOwed0, position.tokensOwed1) = (
+                position.tokensOwed0 + uint128(amount0),
+                position.tokensOwed1 + uint128(amount1)
+            );
+        }
+    }
+
     function _modifyPosition(ModifyPositionParams memory params) 
         private 
-        returns (Position.Info memory position, int256 amount0, int256 amount1) 
+        returns (Position.Info storage position, int256 amount0, int256 amount1) 
     {
         checkTicks(params.tickLower, params.tickUpper);
 
