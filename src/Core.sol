@@ -4,6 +4,7 @@ pragma solidity 0.8.19;
 import {Tick} from './lib/Tick.sol';
 import {TickMath} from './lib/TickMath.sol';
 import {Position} from './lib/Position.sol';
+import {SwapMath} from './lib/SwapMath.sol';
 import {SafeCast} from './lib/SafeCast.sol';
 import {SqrtPriceMath} from './lib/SqrtPriceMath.sol';
 import {TransferHelper} from './lib/TransferHelper.sol';
@@ -287,8 +288,48 @@ contract Core {
             liquidity: cache.liquidityStart
         });
 
-        // TODO:
-        while (true) {}
+        // Start swap loop
+        while (state.amountSpecifiedRemaining != 0 && state.sqrtPriceX96 != sqrtPriceLimitX96) {
+            StepComputations memory step;
+
+            // Current price
+            step.sqrtPriceStartX96 = state.sqrtPriceX96;
+
+            // TODO: next initilized tick
+            step.tickNext = state.tick + 1;
+            step.sqrtPriceNextX96 = TickMath.getSqrtRatioAtTick(step.tickNext);
+
+            (state.sqrtPriceX96, step.amountIn, step.amountOut, step.feeAmount) = SwapMath.computeSwapStep(
+                // Current price
+                state.sqrtPriceX96,
+                // Target price
+                // zero for one --> max(next, limit)
+                // one for zero --> min(next, limit)
+                (zeroForOne
+                    ? step.sqrtPriceNextX96 < sqrtPriceLimitX96
+                    : step.sqrtPriceNextX96 > sqrtPriceLimitX96
+                ) ? sqrtPriceLimitX96 : step.sqrtPriceNextX96,
+                state.liquidity,
+                state.amountSpecifiedRemaining,
+                fee
+            );
+
+            if (exactInput) {
+                state.amountSpecifiedRemaining -= (step.amountIn + step.feeAmount).toInt256();
+                // Represent output amount from pool
+                state.amountCalculated -= step.amountOut.toInt256();
+            } else {
+                // In each step, need fill the desired output amount
+                state.amountSpecifiedRemaining += step.amountOut.toInt256();
+                // Cumulate input amount for swapper
+                state.amountCalculated += (step.amountIn + step.feeAmount).toInt256();
+            }
+
+            // TODO: update global fee tracker
+
+            // TODO
+            if (state.sqrtPriceX96 == step.sqrtPriceNextX96) {}
+        }
 
         // After swap need update current sqrtPriceX96 and tick
         if (state.tick != slot0Start.tick) {
