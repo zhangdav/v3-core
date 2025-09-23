@@ -103,5 +103,26 @@ library SwapMath {
         }
         
         // Calculate fee on amount in
+        if (exactIn && sqrtRatioNextX96 != sqrtRatioTargetX96) {
+            feeAmount = uint256(amountRemaining) - amountIn;
+        } else {
+            // Not exact in or sqrt ratio next = target
+            // - Not    exact input
+            // - Exact input and sqrt ratio next = target
+
+            // a = amountIn
+            // f = feePips
+            // x = Amount in needed to put amountIn + fee
+            // fee = x * f
+
+            // Solve for x
+            // x = a + fee = a + x * f
+            // x * (1 - f) = a
+            // x = a / (1 - f)
+
+            // Calculate fee
+            // fee = x * f = a / (1 - f) * f
+            feeAmount = FullMath.mulDivRoundingUp(amountIn, feePips, 1e6 - feePips);
+        }
     }
 }
