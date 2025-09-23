@@ -23,6 +23,47 @@ contract Core {
     uint128 public immutable maxLiquidityPerTick;
     uint128 public liquidity;
 
+    // Fee growth global as a Q128.128
+    uint256 public feeGrowthGlobal0X128;
+    uint256 public feeGrowthGlobal1X128;
+
+    struct SwapCache {
+        // Liquidity at the beginning of the swap
+        uint128 liquidityStart;
+    }
+
+    struct SwapState {
+        // The amount remaining to be swapped in/out of the input/output asset
+        int256 amountSpecifiedRemaining;
+        // The amount already swapped out/in of the output/input asset
+        int256 amountCalculated;
+        // Current sqrt(price)
+        uint160 sqrtPriceX96;
+        // The tick associated with the current price
+        int24 tick;
+        // The global fee growth of the input token
+        uint256 feeGrowthGlobalX128;
+        // The current liquidity in range
+        uint128 liquidity;
+    }
+
+    struct StepComputations {
+        // The price at the beginning of the step
+        uint160 sqrtPriceStartX96;
+        // The next tick to swap to from the current tick in the swap direction
+        int24 tickNext;
+        // Whether tickNext is initialized or not
+        bool initialized;
+        // Sqrt(price) for the next tick (1/0)
+        uint160 sqrtPriceNextX96;
+        // How much is being swapped in in this step
+        uint256 amountIn;
+        // How much is being swapped out
+        uint256 amountOut;
+        // How much fee is being paid in this step
+        uint256 feeAmount;
+    }
+
     struct ModifyPositionParams {
         address owner;
         int24 tickLower;
@@ -34,13 +75,13 @@ contract Core {
     // 20 + 3 + 1 < 32 bytes
     struct Slot0 {
         // 20 bytes
-        // the current price
+        // The current price
         uint160 sqrtPriceX96;
         // 3 bytes
-        // the current tick
+        // The current tick
         int24 tick;
         // 1 bytes
-        // whether the pool is locked
+        // Whether the pool is locked
         bool unlocked;
     }
 
@@ -49,7 +90,7 @@ contract Core {
     // ID => position
     mapping(bytes32 => Position.Info) public positions;
 
-    // tick => tick info
+    // Tick => tick info
     mapping(int24 => Tick.Info) public ticks;
 
     // Reentrancy guard
@@ -61,6 +102,40 @@ contract Core {
     }
 
     event Initialize(uint160 sqrtPriceX96, int24 tick);
+    event Mint(
+        address sender,
+        address indexed owner,
+        int24 indexed tickLower,
+        int24 indexed tickUpper,
+        uint128 amount,
+        uint256 amount0,
+        uint256 amount1
+    );
+    event Collect(
+        address indexed owner,
+        address recipient,
+        int24 indexed tickLower,
+        int24 indexed tickUpper,
+        uint128 amount0,
+        uint128 amount1
+    );
+    event Burn(
+        address indexed owner,
+        int24 indexed tickLower,
+        int24 indexed tickUpper,
+        uint128 amount,
+        uint256 amount0,
+        uint256 amount1
+    );
+    event Swap(
+        address indexed sender,
+        address indexed recipient,
+        int256 amount0,
+        int256 amount1,
+        uint160 sqrtPriceX96,
+        uint128 liquidity,
+        int24 tick
+    );
 
     constructor(
         address _token0,
@@ -118,6 +193,8 @@ contract Core {
         if (amount1 > 0) {
             IERC20(token1).transferFrom(msg.sender, address(this), amount1);
         }
+
+        emit Mint(msg.sender, recipient, tickLower, tickUpper, amount, amount0, amount1);
     }
 
     function collect(
@@ -141,6 +218,8 @@ contract Core {
             position.tokensOwed1 -= amount1;
             TransferHelper.safeTransfer(token1, recipient, amount1);
         }
+
+        emit Collect(msg.sender, recipient, tickLower, tickUpper, amount0, amount1);
     }
 
     // Burn liquidity from a position
@@ -163,12 +242,99 @@ contract Core {
         amount1 = uint256(-amount1Int);
 
         if (amount0 > 0 || amount1 > 0) {
-            // no transfer of tokens
+            // No transfer of tokens
             (position.tokensOwed0, position.tokensOwed1) = (
                 position.tokensOwed0 + uint128(amount0),
                 position.tokensOwed1 + uint128(amount1)
             );
         }
+
+        emit Burn(msg.sender, tickLower, tickUpper, amount, amount0, amount1);
+    }
+
+    function swap(
+        address recipient,
+        bool zeroForOne,
+        int256 amountSpecified,
+        uint160 sqrtPriceLimitX96
+    ) external lock returns (int256 amount0, int256 amount1) {
+        require(amountSpecified != 0);
+
+        Slot0 memory slot0Start = slot0;
+
+        // token 1 | token 0
+        // --------|--------
+        //        tick
+        // <-- zero for one
+        //      one for zero -->
+        require(
+            zeroForOne
+                ? sqrtPriceLimitX96 < slot0Start.sqrtPriceX96 && sqrtPriceLimitX96 > TickMath.MIN_SQRT_RATIO
+                : sqrtPriceLimitX96 > slot0Start.sqrtPriceX96 && sqrtPriceLimitX96 < TickMath.MAX_SQRT_RATIO,
+            "Swap: invalid sqrt price limit"
+        );
+
+        SwapCache memory cache = SwapCache({liquidityStart: liquidity});
+
+        bool exactInput = amountSpecified > 0;
+
+        SwapState memory state = SwapState({
+            amountSpecifiedRemaining: amountSpecified,
+            amountCalculated: 0,
+            sqrtPriceX96: slot0Start.sqrtPriceX96,
+            tick: slot0Start.tick,
+            feeGrowthGlobalX128: zeroForOne ? feeGrowthGlobal0X128 : feeGrowthGlobal1X128,
+            liquidity: cache.liquidityStart
+        });
+
+        // TODO:
+        while (true) {}
+
+        // After swap need update current sqrtPriceX96 and tick
+        if (state.tick != slot0Start.tick) {
+            (slot0.sqrtPriceX96, slot0.tick) = (state.sqrtPriceX96, state.tick);
+        } else {
+            slot0.sqrtPriceX96 = state.sqrtPriceX96;
+        }
+
+        // After swap need update liquidity
+        if (cache.liquidityStart != state.liquidity) {
+            liquidity = state.liquidity;
+        }
+
+        // After swap need update feeGrowthGlobal0X128 or feeGrowthGlobal1X128
+        if (zeroForOne) {
+            feeGrowthGlobal0X128 = state.feeGrowthGlobalX128;
+        } else {
+            feeGrowthGlobal1X128 = state.feeGrowthGlobalX128;
+        }
+
+        // zero for one | exact input |
+        //     true     |     true    |  amount 0 = specified - remaining (>0)
+        //              |             |  amount 1 = calculated            (<0)
+        //     false    |     true    |  amount 0 = calculated            (<0)
+        //              |             |  amount 1 = specified - remaining (>0)
+        //     true     |     false   |  amount 0 = calculated            (>0)
+        //              |             |  amount 1 = specified - remaining (<0)
+        //     false    |     false   |  amount 0 = specified - remaining (<0)
+        //              |             |  amount 1 = calculated            (>0)
+        (amount0, amount1) = zeroForOne == exactInput
+            ? (amountSpecified - state.amountSpecifiedRemaining, state.amountCalculated)
+            : (state.amountCalculated, amountSpecified - state.amountSpecifiedRemaining);
+ 
+        if (zeroForOne) {
+            if (amount1 < 0) {
+                IERC20(token1).transfer(msg.sender, uint256(-amount1));
+                IERC20(token0).transferFrom(msg.sender, address(this), uint256(amount0));
+            }
+        } else {
+            if (amount0 < 0) {
+                IERC20(token0).transfer(msg.sender, uint256(-amount0));
+                IERC20(token1).transferFrom(msg.sender, address(this), uint256(amount1));
+            }
+        }
+
+        emit Swap(msg.sender, recipient, amount0, amount1, state.sqrtPriceX96, state.liquidity, state.tick);
     }
 
     function _modifyPosition(ModifyPositionParams memory params) 
@@ -190,7 +356,7 @@ contract Core {
         if (params.liquidityDelta != 0) {
             // Condition: P < P_lower
             if (_slot0.tick < params.tickLower) {
-            // delta x = delta L * (1/√P_A - 1/√P_B)
+            // Delta x = delta L * (1/√P_A - 1/√P_B)
             amount0 = SqrtPriceMath.getAmount0Delta(
                 TickMath.getSqrtRatioAtTick(params.tickLower),  // √P_A
                 TickMath.getSqrtRatioAtTick(params.tickUpper),  // √P_B
@@ -198,7 +364,7 @@ contract Core {
             );
             // Condition: P_lower < P < P_upper
             } else if (_slot0.tick > params.tickUpper) {
-                // delta L = (delta x / 1/√P - 1/√P_B = delta y / √P - 1/√P_B
+                // Delta L = (delta x / 1/√P - 1/√P_B = delta y / √P - 1/√P_B
                 amount0 = SqrtPriceMath.getAmount0Delta(
                     _slot0.sqrtPriceX96,                            // √P
                     TickMath.getSqrtRatioAtTick(params.tickUpper),  // √P_B
@@ -215,7 +381,7 @@ contract Core {
                     : liquidity + uint128(params.liquidityDelta);
             // Condition: P > P_upper
             } else {
-                // delta y = delta L * (√P_B - √P_A)
+                // Delta y = delta L * (√P_B - √P_A)
                 amount1 = SqrtPriceMath.getAmount1Delta(
                     TickMath.getSqrtRatioAtTick(params.tickLower),  // √P_A
                     TickMath.getSqrtRatioAtTick(params.tickUpper),  // √P_B
