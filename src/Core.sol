@@ -7,6 +7,7 @@ import {Position} from './lib/Position.sol';
 import {SwapMath} from './lib/SwapMath.sol';
 import {SafeCast} from './lib/SafeCast.sol';
 import {SqrtPriceMath} from './lib/SqrtPriceMath.sol';
+import {TickBitmap} from './lib/TickBitmap.sol';
 import {TransferHelper} from './lib/TransferHelper.sol';
 import {IERC20} from './interfaces/IERC20.sol';
 
@@ -15,6 +16,7 @@ using SafeCast for int256;
 using Position for Position.Info;
 using Tick for mapping(int24 => Tick.Info);
 using Tick for Tick.Info;
+using TickBitmap for mapping(int16 => uint256);
 
 contract Core {
     address public immutable token0;
@@ -93,6 +95,9 @@ contract Core {
 
     // Tick => tick info
     mapping(int24 => Tick.Info) public ticks;
+
+    // Tick => bitmap
+    mapping(int16 => uint256) public tickBitmap;
 
     // Reentrancy guard
     modifier lock() {
@@ -296,7 +301,23 @@ contract Core {
             step.sqrtPriceStartX96 = state.sqrtPriceX96;
 
             // TODO: next initilized tick
-            step.tickNext = state.tick + 1;
+            (step.tickNext, step.initialized) = tickBitmap.nextInitializedTickWithinOneWord(
+                state.tick,
+                tickSpacing,
+                // token 1 | token 0
+                //        tick
+                // zero for one --> price decreases --> lte
+                // one for zero --> price increases --> gt
+                zeroForOne
+            );
+
+            // Bound tick next
+            if (step.tickNext < TickMath.MIN_TICK) {
+                step.tickNext = TickMath.MIN_TICK;
+            } else if (step.tickNext > TickMath.MAX_TICK) {
+                step.tickNext = TickMath.MAX_TICK;
+            }
+
             step.sqrtPriceNextX96 = TickMath.getSqrtRatioAtTick(step.tickNext);
 
             (state.sqrtPriceX96, step.amountIn, step.amountOut, step.feeAmount) = SwapMath.computeSwapStep(
@@ -328,7 +349,30 @@ contract Core {
             // TODO: update global fee tracker
 
             // TODO
-            if (state.sqrtPriceX96 == step.sqrtPriceNextX96) {}
+            if (state.sqrtPriceX96 == step.sqrtPriceNextX96) {
+                if (step.initialized) {
+                    int128 liquidityNet = ticks.cross(
+                        step.tickNext,
+                        zeroForOne
+                            ? state.feeGrowthGlobalX128
+                            : feeGrowthGlobal0X128,
+                        zeroForOne
+                            ? feeGrowthGlobal1X128
+                            : state.feeGrowthGlobalX128
+                    );
+
+                    if (zeroForOne) {
+                        liquidityNet = -liquidityNet;
+                    }
+
+                    state.liquidity = liquidityNet < 0
+                        ? state.liquidity - uint128(-liquidityNet)
+                        : state.liquidity + uint128(liquidityNet);
+                }
+                state.tick = zeroForOne ? step.tickNext - 1 : step.tickNext;
+            } else if (state.sqrtPriceX96 > step.sqrtPriceNextX96) {
+                state.tick = TickMath.getTickAtSqrtRatio(state.sqrtPriceX96);
+            }
         }
 
         // After swap need update current sqrtPriceX96 and tick
@@ -466,6 +510,14 @@ contract Core {
                 true,
                 maxLiquidityPerTick
             );
+
+            if (flippedLower) {
+                tickBitmap.flipTick(tickLower, tickSpacing);
+            }
+
+            if (flippedUpper) {
+                tickBitmap.flipTick(tickUpper, tickSpacing);
+            }
         }
 
         /// TODO: fees
