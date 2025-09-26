@@ -9,6 +9,8 @@ import {SafeCast} from './lib/SafeCast.sol';
 import {SqrtPriceMath} from './lib/SqrtPriceMath.sol';
 import {TickBitmap} from './lib/TickBitmap.sol';
 import {TransferHelper} from './lib/TransferHelper.sol';
+import {FullMath} from './lib/FullMath.sol';
+import {FixedPoint128} from './lib/FixedPoint128.sol';
 import {IERC20} from './interfaces/IERC20.sol';
 
 using SafeCast for uint256;
@@ -346,9 +348,17 @@ contract Core {
                 state.amountCalculated += (step.amountIn + step.feeAmount).toInt256();
             }
 
-            // TODO: update global fee tracker
+            // update global fee tracker
+            // update feeGrowthGlobalX128
+            // and then (feeGrowthInside − feeGrowthInsideLast) * liquidity / Q128 in position
+            if (state.liquidity > 0) {
+                state.feeGrowthGlobalX128 += FullMath.mulDiv(
+                    step.feeAmount, FixedPoint128.Q128, state.liquidity
+                );
+            }
 
             // TODO
+            // After swap, price equals to next tick price
             if (state.sqrtPriceX96 == step.sqrtPriceNextX96) {
                 if (step.initialized) {
                     int128 liquidityNet = ticks.cross(
@@ -369,7 +379,10 @@ contract Core {
                         ? state.liquidity - uint128(-liquidityNet)
                         : state.liquidity + uint128(liquidityNet);
                 }
+                // zero for one --> price decreases --> tick decreases to next tick - 1
+                // one for zero --> price increases --> tick increases to next tick
                 state.tick = zeroForOne ? step.tickNext - 1 : step.tickNext;
+            // After swap, price not equals to next tick price
             } else if (state.sqrtPriceX96 > step.sqrtPriceNextX96) {
                 state.tick = TickMath.getTickAtSqrtRatio(state.sqrtPriceX96);
             }
@@ -485,9 +498,8 @@ contract Core {
     ) private returns (Position.Info storage position) {
         position = Position.get(positions, owner, tickLower, tickUpper);
 
-        /// TODO: fees
-        uint256 _feeGrowthGlobal0X128 = 0;
-        uint256 _feeGrowthGlobal1X128 = 0;
+        uint256 _feeGrowthGlobal0X128 = feeGrowthGlobal0X128;
+        uint256 _feeGrowthGlobal1X128 = feeGrowthGlobal1X128;
 
         bool flippedLower;
         bool flippedUpper;
@@ -520,8 +532,15 @@ contract Core {
             }
         }
 
-        /// TODO: fees
-        position.update(liquidityDelta, 0, 0);
+        (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128) = ticks.getFeeGrowthInside(
+            tickLower,
+            tickUpper,
+            tick,
+            _feeGrowthGlobal0X128,
+            _feeGrowthGlobal1X128
+        );
+
+        position.update(liquidityDelta, feeGrowthInside0X128, feeGrowthInside1X128);
 
         // When decreasing liquidity, clear the tick
         if (liquidityDelta < 0) {
